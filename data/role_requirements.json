@@ -1,0 +1,38 @@
+{
+  "Data Scientist": {
+    "skills": ["Python", "SQL", "Machine Learning", "Statistics", "Data Visualization", "TensorFlow", "PyTorch", "Data Wrangling", "Big Data", "A/B Testing"],
+    "certifications": ["Google Professional Data Engineer", "AWS Certified Data Analytics", "TensorFlow Developer Certificate"],
+    "learning_path": {
+      "beginner": ["Python for Data Science", "SQL for Data Analysis", "Statistics with Python"],
+      "intermediate": ["Machine Learning with Scikit-learn", "Data Visualization with Matplotlib/Seaborn", "Data Wrangling with Pandas"],
+      "advanced": ["Deep Learning with TensorFlow/PyTorch", "Big Data with Spark", "MLOps Fundamentals"]
+    }
+  },
+  "Frontend Developer": {
+    "skills": ["HTML", "CSS", "JavaScript", "React", "Angular", "Vue.js", "Responsive Design", "Web Performance", "Accessibility", "REST APIs"],
+    "certifications": ["Meta Front-End Developer Professional Certificate", "Scrum Master Certified", "AWS Developer Associate"],
+    "learning_path": {
+      "beginner": ["HTML & CSS Basics", "JavaScript Fundamentals", "Responsive Web Design"],
+      "intermediate": ["Advanced JavaScript", "React.js Complete Guide", "State Management with Redux"],
+      "advanced": ["Next.js Framework", "Web Performance Optimization", "Testing with Jest & React Testing Library"]
+    }
+  },
+  "Product Manager": {
+    "skills": ["Product Strategy", "User Research", "Agile Methodologies", "Data Analysis", "Roadmapping", "Stakeholder Management", "MVP Definition", "A/B Testing", "Product Metrics", "Market Analysis"],
+    "certifications": ["Certified Scrum Product Owner (CSPO)", "Pragmatic Institute Certification", "Product Management Professional (PMP)"],
+    "learning_path": {
+      "beginner": ["Product Management Fundamentals", "Agile & Scrum Basics", "User Research Methods"],
+      "intermediate": ["Product Analytics", "Roadmapping & Prioritization", "MVP Development Strategies"],
+      "advanced": ["Product Strategy & Leadership", "Data-Driven Decision Making", "Advanced Stakeholder Management"]
+    }
+  },
+  "Cybersecurity Analyst": {
+    "skills": ["Network Security", "Incident Response", "SIEM Tools", "Vulnerability Assessment", "Firewalls", "IDS/IPS", "Security Audits", "Risk Management", "Python for Security", "Compliance Frameworks"],
+    "certifications": ["CompTIA Security+", "Certified Ethical Hacker (CEH)", "CISSP"],
+    "learning_path": {
+      "beginner": ["Network Security Fundamentals", "Security+ Certification Prep", "Introduction to Cybersecurity Tools"],
+      "intermediate": ["Ethical Hacking with CEH", "Incident Response & Forensics", "SIEM Implementation"],
+      "advanced": ["CISSP Prep Course", "Advanced Threat Hunting", "Cloud Security Architecture"]
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "courses": {
+    "Python for Data Science": {"url": "https://www.coursera.org/learn/python-for-data-science", "platform": "Coursera"},
+    "SQL for Data Analysis": {"url": "https://www.udemy.com/course/sql-for-data-analysis", "platform": "Udemy"},
+    "React.js Complete Guide": {"url": "https://www.udemy.com/course/react-the-complete-guide", "platform": "Udemy"},
+    "Product Management Fundamentals": {"url": "https://www.coursera.org/specializations/product-management", "platform": "Coursera"},
+    "Security+ Certification Prep": {"url": "https://www.professormesser.com/security-plus/sy0-701", "platform": "Professor Messer"}
+  }
+}
