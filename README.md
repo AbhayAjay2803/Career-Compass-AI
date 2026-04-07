@@ -11,3 +11,4 @@ AI-powered career advisor that analyzes your resume and generates a personalized
 5. Run setup: `python scripts/setup_vector_store.py`
 6. Start backend: `uvicorn backend.main:app --reload`
 7. Start frontend: `streamlit run frontend/app.py`
+8. Live Link: `https://career-compass-ai-sstj3dbkmk9nk6ot8yprz7.streamlit.app/`
