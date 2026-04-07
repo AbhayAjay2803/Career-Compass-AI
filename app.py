@@ -1,22 +1,26 @@
 import streamlit as st
 import json
 import os
+import re
+import requests
 from pathlib import Path
 from PyPDF2 import PdfReader
 import io
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
+import warnings
+warnings.filterwarnings('ignore')
 
 # ------------------------------
-# Load API key from .env file
+# Load API key from Streamlit secrets (cloud) or .env (local)
 # ------------------------------
-load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+try:
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+except Exception:
+    from dotenv import load_dotenv
+    load_dotenv()
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
 if not GOOGLE_API_KEY:
-    st.error("Google API key not found. Please set GOOGLE_API_KEY in a .env file.")
+    st.error("Google API key not found. Please set GOOGLE_API_KEY in secrets or .env.")
     st.stop()
 
 # ------------------------------
@@ -32,8 +36,13 @@ def load_css():
 load_css()
 
 # ------------------------------
-# Initialize embedding model (cached)
+# Cached resources: embeddings, vector store, local LLM client
 # ------------------------------
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.language_models.llms import LLM
+
 @st.cache_resource
 def load_embeddings():
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -48,40 +57,75 @@ def load_vector_store():
         st.error("FAISS index not found. Run scripts/setup_vector_store.py first.")
         st.stop()
 
+@st.cache_resource
+def get_local_llm():
+    """Initialize Ollama local LLM client if available."""
+    try:
+        # Check if Ollama is running and model exists
+        resp = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if resp.status_code == 200:
+            models = resp.json().get("models", [])
+            # Use a small but capable model; you can change this
+            preferred_model = "llama3.2:3b"
+            if not any(m['name'].startswith(preferred_model) for m in models):
+                st.info(f"Local model '{preferred_model}' not found. Will download on first use.")
+                # Optionally trigger download (commented for performance)
+                # requests.post("http://localhost:11434/api/pull", json={"name": preferred_model})
+            return OllamaLLM(model=preferred_model)
+    except Exception:
+        pass
+    return None
+
+# Simple wrapper for Ollama to work with LangChain's interface
+class OllamaLLM(LLM):
+    model: str = "llama3.2:3b"
+    temperature: float = 0.3
+    
+    def _call(self, prompt: str, stop=None, **kwargs) -> str:
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "temperature": self.temperature,
+            "stream": False
+        }
+        response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=60)
+        response.raise_for_status()
+        return response.json()["response"]
+    
+    @property
+    def _llm_type(self) -> str:
+        return "ollama"
+
 # ------------------------------
-# Helper functions with model fallback
+# Helper functions with fallback logic
 # ------------------------------
-def get_llm():
-    """Try multiple model names until one works."""
-    models_to_try = [
-        "gemini-2.0-flash",
-        "gemini-2.5-flash", 
-        "gemini-flash-latest",
-        "gemini-2.0-pro",
-        "gemini-pro",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro"
-    ]
-    for model_name in models_to_try:
-        try:
-            llm = ChatGoogleGenerativeAI(
-                model=model_name,
-                google_api_key=GOOGLE_API_KEY,
-                temperature=0.3
-            )
-            # Quick test call to verify model works
-            test_response = llm.invoke("Say OK")
-            if test_response and test_response.content:
-                print(f"Using model: {model_name}")
-                return llm
-        except Exception as e:
-            continue
-    # Fallback to the first model (will likely fail, but better than None)
+def get_gemini_llm():
+    """Create Gemini LLM instance using the API key."""
     return ChatGoogleGenerativeAI(
         model="gemini-2.0-flash",
         google_api_key=GOOGLE_API_KEY,
         temperature=0.3
     )
+
+def invoke_with_fallback(prompt, gemini_llm, local_llm):
+    """Try Gemini first, then local Ollama if Gemini fails."""
+    # Try Gemini
+    try:
+        response = gemini_llm.invoke(prompt)
+        return response.content, "Gemini (Google)"
+    except Exception as e:
+        st.warning(f"Gemini API failed: {e}. Switching to local model.")
+        # Try local Ollama
+        if local_llm:
+            try:
+                response = local_llm.invoke(prompt)
+                return response, "Local (Ollama - open source)"
+            except Exception as e2:
+                st.error(f"Local model also failed: {e2}")
+                return None, None
+        else:
+            st.error("No local fallback available. Please check Ollama installation.")
+            return None, None
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     try:
@@ -95,8 +139,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     except Exception as e:
         return f"Error: {str(e)}"
 
-def extract_skills_from_resume(resume_text: str) -> dict:
-    llm = get_llm()
+def extract_skills_from_resume(resume_text: str, gemini_llm, local_llm):
     prompt = f"""
     Analyze the following resume and extract key information.
     Return ONLY a JSON object with these exact keys: "skills", "experience", "education".
@@ -107,92 +150,78 @@ def extract_skills_from_resume(resume_text: str) -> dict:
     Resume Text:
     {resume_text[:4000]}
     """
+    content, model_used = invoke_with_fallback(prompt, gemini_llm, local_llm)
+    if content is None:
+        return {"skills": [], "experience": [], "education": []}, None
+    # Clean markdown
+    if "```json" in content:
+        content = content.split("```json")[1].split("```")[0]
+    elif "```" in content:
+        content = content.split("```")[1].split("```")[0]
     try:
-        response = llm.invoke(prompt)
-        content = response.content
-        # Clean up markdown code blocks
+        return json.loads(content), model_used
+    except:
+        return {"skills": [], "experience": [], "education": []}, model_used
+
+def analyze_skill_gap(user_skills, target_role, vector_store, gemini_llm, local_llm):
+    docs = vector_store.similarity_search(target_role, k=1)
+    if not docs:
+        return {"match_score": 0, "missing_skills": [], "analysis": "Role not found."}, None
+    role_info = docs[0].page_content
+    
+    prompt = f"""
+    Compare the user's skills with the target role requirements.
+    
+    User Skills: {', '.join(user_skills)}
+    
+    Role Requirements: {role_info}
+    
+    Return ONLY a JSON object with:
+    - "match_score": a number from 0 to 100
+    - "missing_skills": list of important missing skills
+    - "analysis": a brief explanation
+    """
+    content, model_used = invoke_with_fallback(prompt, gemini_llm, local_llm)
+    if content is None:
+        # Fallback to rule-based scoring
+        return fallback_skill_analysis(user_skills, target_role, vector_store), "Rule-based fallback"
+    try:
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0]
         elif "```" in content:
             content = content.split("```")[1].split("```")[0]
-        return json.loads(content)
-    except Exception as e:
-        st.warning(f"Skill extraction failed: {e}")
-        return {"skills": [], "experience": [], "education": []}
+        return json.loads(content), model_used
+    except:
+        return fallback_skill_analysis(user_skills, target_role, vector_store), "Rule-based fallback"
 
-def analyze_skill_gap(user_skills: list, target_role: str, vector_store) -> dict:
+def fallback_skill_analysis(user_skills, target_role, vector_store):
     docs = vector_store.similarity_search(target_role, k=1)
     if not docs:
         return {"match_score": 0, "missing_skills": [], "analysis": "Role not found."}
-    
     role_info = docs[0].page_content
-    
-    # Try to use LLM for analysis, but have a fallback
-    try:
-        llm = get_llm()
-        prompt = f"""
-        Compare the user's skills with the target role requirements.
-        
-        User Skills: {', '.join(user_skills)}
-        
-        Role Requirements: {role_info}
-        
-        Return ONLY a JSON object with:
-        - "match_score": a number from 0 to 100
-        - "missing_skills": list of important missing skills
-        - "analysis": a brief explanation
-        """
-        response = llm.invoke(prompt)
-        content = response.content
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-        return json.loads(content)
-    except Exception as e:
-        # Fallback: calculate match score based on skill overlap
-        st.warning(f"LLM analysis failed, using fallback scoring: {e}")
-        return fallback_skill_analysis(user_skills, target_role, vector_store)
-
-def fallback_skill_analysis(user_skills: list, target_role: str, vector_store) -> dict:
-    """Calculate match score based on skill overlap without using LLM."""
-    docs = vector_store.similarity_search(target_role, k=1)
-    if not docs:
-        return {"match_score": 0, "missing_skills": [], "analysis": "Role not found."}
-    
-    role_info = docs[0].page_content
-    import re
-    
-    # Extract required skills from role_info (look for "Required Skills: ...")
     required_skills_match = re.search(r'Required Skills: (.*?)(?:\n|$)', role_info)
     if required_skills_match:
-        required_skills_text = required_skills_match.group(1)
-        required_skills = [s.strip() for s in required_skills_text.split(',')]
+        required_skills = [s.strip() for s in required_skills_match.group(1).split(',')]
     else:
         required_skills = []
-    
-    # Calculate overlap
     user_skills_lower = [s.lower() for s in user_skills]
     missing_skills = []
     for skill in required_skills:
         skill_lower = skill.lower()
-        if not any(user_skill in skill_lower or skill_lower in user_skill for user_skill in user_skills_lower):
+        if not any(us in skill_lower or skill_lower in us for us in user_skills_lower):
             missing_skills.append(skill)
-    
-    # Calculate match score (percentage of required skills matched)
     if required_skills:
         matched = len([s for s in required_skills if any(us in s.lower() or s.lower() in us for us in user_skills_lower)])
         match_score = int((matched / len(required_skills)) * 100)
     else:
         match_score = 50
-    
     return {
         "match_score": match_score,
         "missing_skills": missing_skills,
-        "analysis": f"Based on skill comparison: {match_score}% match with {len(missing_skills)} skills to develop."
+        "analysis": f"Based on skill overlap: {match_score}% match."
     }
 
-def generate_roadmap(user_skills: list, missing_skills: list, target_role: str, vector_store) -> str:
+def generate_roadmap(user_skills, missing_skills, target_role, vector_store, gemini_llm, local_llm):
     docs = vector_store.similarity_search(target_role, k=1)
     role_context = docs[0].page_content if docs else ""
     resources_path = Path(__file__).parent / "data" / "learning_resources.json"
@@ -202,35 +231,31 @@ def generate_roadmap(user_skills: list, missing_skills: list, target_role: str, 
     except:
         resources = {"courses": {}}
     
-    try:
-        llm = get_llm()
-        prompt = f"""
-        You are a career advisor. Generate a personalized learning roadmap.
-        
-        User's Current Skills: {', '.join(user_skills)}
-        Skills to Acquire: {', '.join(missing_skills)}
-        Target Role: {target_role}
-        
-        Role Requirements Context: {role_context}
-        
-        Available Learning Resources: {json.dumps(resources, indent=2)}
-        
-        Provide a roadmap with:
-        1. Brief summary
-        2. Recommended learning path (specific courses/resources)
-        3. Suggested certifications
-        4. Timeline (3, 6, 12 months)
-        
-        Format as Markdown.
-        """
-        response = llm.invoke(prompt)
-        return response.content
-    except Exception as e:
-        # Fallback roadmap
-        return generate_fallback_roadmap(missing_skills, target_role)
+    prompt = f"""
+    You are a career advisor. Generate a personalized learning roadmap.
+    
+    User's Current Skills: {', '.join(user_skills)}
+    Skills to Acquire: {', '.join(missing_skills)}
+    Target Role: {target_role}
+    
+    Role Requirements Context: {role_context}
+    
+    Available Learning Resources: {json.dumps(resources, indent=2)}
+    
+    Provide a roadmap with:
+    1. Brief summary
+    2. Recommended learning path (specific courses/resources)
+    3. Suggested certifications
+    4. Timeline (3, 6, 12 months)
+    
+    Format as Markdown.
+    """
+    content, model_used = invoke_with_fallback(prompt, gemini_llm, local_llm)
+    if content is None:
+        return generate_fallback_roadmap(missing_skills, target_role), "Rule-based fallback"
+    return content, model_used
 
-def generate_fallback_roadmap(missing_skills: list, target_role: str) -> str:
-    """Generate a simple roadmap without using LLM."""
+def generate_fallback_roadmap(missing_skills, target_role):
     if not missing_skills:
         return f"""
 ## Your Career Path to {target_role}
@@ -245,37 +270,24 @@ Great news! You already have the key skills needed for this role.
 
 ### Estimated Timeline: 1-3 months
 """
-    
     roadmap = f"""
 ## Your Personalized Roadmap to {target_role}
 
 ### Skills to Focus On:
 """
-    for skill in missing_skills[:5]:  # Limit to 5 skills
+    for skill in missing_skills[:5]:
         roadmap += f"- **{skill}**\n"
-    
     roadmap += f"""
 ### Learning Path:
 
-1. **Master the Fundamentals**
-   - Focus on the core concepts of {', '.join(missing_skills[:2])}
-   - Take online courses on Coursera, Udemy, or NPTEL
-
-2. **Build Practical Experience**
-   - Work on projects that use these technologies
-   - Contribute to open source or build a portfolio
-
-3. **Get Certified**
-   - Look for certifications in {target_role} domain
-   - Consider industry-recognized credentials
+1. **Master the Fundamentals** – focus on {', '.join(missing_skills[:2])}
+2. **Build Practical Experience** – work on projects using these skills
+3. **Get Certified** – look for certifications in {target_role}
 
 ### Suggested Timeline:
 - **3 months**: Complete foundational courses
-- **6 months**: Build 2-3 portfolio projects  
+- **6 months**: Build 2-3 portfolio projects
 - **12 months**: Apply for roles and continue advanced learning
-
-### Next Steps:
-Start with one online course today. Consistency is more important than intensity!
 """
     return roadmap
 
@@ -294,7 +306,7 @@ with st.sidebar:
     3. Get your **match score**, **skill gaps**, and a **personalized roadmap**
     """)
     st.markdown("---")
-    st.caption("Powered by Google Gemini AI & RAG")
+    st.caption("Powered by Google Gemini AI & RAG with local fallback (Ollama)")
 
 # Load roles from dataset
 roles_path = Path(__file__).parent / "data" / "role_requirements.json"
@@ -320,23 +332,27 @@ if analyze_button:
     if not uploaded_file:
         st.error("Please upload your resume first.")
     else:
+        with st.spinner("Initializing AI models..."):
+            gemini_llm = get_gemini_llm()
+            local_llm = get_local_llm()
+            vector_store = load_vector_store()
+        
         with st.spinner("Analyzing your resume and generating roadmap..."):
             # Extract text from PDF
             resume_text = extract_text_from_pdf(uploaded_file.getvalue())
-            
             if resume_text and "No text extracted" not in resume_text and "Error" not in resume_text:
                 # Extract skills
-                extracted = extract_skills_from_resume(resume_text)
+                extracted, model_skills = extract_skills_from_resume(resume_text, gemini_llm, local_llm)
                 user_skills = extracted.get("skills", [])
                 
-                # Load vector store
-                vector_store = load_vector_store()
+                # Analyze gap
+                gap, model_gap = analyze_skill_gap(user_skills, selected_role, vector_store, gemini_llm, local_llm)
                 
-                # Analyze gap (with fallback)
-                gap = analyze_skill_gap(user_skills, selected_role, vector_store)
+                # Generate roadmap
+                roadmap, model_roadmap = generate_roadmap(user_skills, gap.get("missing_skills", []), selected_role, vector_store, gemini_llm, local_llm)
                 
-                # Generate roadmap (with fallback)
-                roadmap = generate_roadmap(user_skills, gap.get("missing_skills", []), selected_role, vector_store)
+                # Display model used (for transparency)
+                st.info(f"🧠 Analysis powered by: **{model_skills}** (skills), **{model_gap}** (gap), **{model_roadmap}** (roadmap)")
                 
                 # Display results
                 st.markdown(f"### 🎯 Match Score: {gap.get('match_score', 0)}%")
